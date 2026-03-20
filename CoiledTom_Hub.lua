@@ -842,10 +842,10 @@ local function removeHitbox(player)
     for _, e in ipairs(d.entries or {}) do
         pcall(function()
             if e.part and e.part.Parent then
-                e.part.Size         = e.origSize
-                e.part.CanCollide   = e.origCC
-                e.part.Transparency = e.origTransp
-                e.part.Massless     = e.origMass
+                e.part.Size                      = e.origSize
+                e.part.CanCollide                = e.origCC
+                e.part.Massless                  = e.origMass
+                e.part.LocalTransparencyModifier = e.origLTM or 0
             end
         end)
     end
@@ -865,7 +865,6 @@ local function applyHitbox(player)
 
     local size = math.max(State.HitboxSize or 10, 1)
 
-    -- Lista das parts principais (R15 + R6 + fallback)
     local partNames = {
         "HumanoidRootPart","Head",
         "UpperTorso","LowerTorso","Torso",
@@ -882,42 +881,40 @@ local function applyHitbox(player)
         local part = char:FindFirstChild(name)
         if part and part:IsA("BasePart") then
             pcall(function()
-                local entry = {
-                    part       = part,
-                    origSize   = part.Size,
-                    origCC     = part.CanCollide,
-                    origTransp = part.Transparency,
-                    origMass   = part.Massless,
-                }
-                -- Expande a part original (servidor detecta)
+                table.insert(entries, {
+                    part     = part,
+                    origSize = part.Size,
+                    origCC   = part.CanCollide,
+                    origMass = part.Massless,
+                    origLTM  = part.LocalTransparencyModifier,
+                })
                 part.Size         = Vector3.new(size, size, size)
-                -- Sem colisão → não trava, não empurra
                 part.CanCollide   = false
                 part.Massless     = true
-                -- Invisível para o cliente local
-                part.LocalTransparencyModifier = State.HitboxAlpha
-                table.insert(entries, entry)
+                -- SEMPRE invisível para o cliente:
+                -- as parts expandidas ficam escondidas, personagem animado
+                -- continua visível através dos MeshParts/accessories que
+                -- não foram expandidos
+                part.LocalTransparencyModifier = 1
             end)
         end
     end
 
-    -- Se não achou nenhuma, usa qualquer BasePart
     if #entries == 0 then
         for _, v in ipairs(char:GetChildren()) do
             if v:IsA("BasePart") then
                 pcall(function()
-                    local entry = {
-                        part       = v,
-                        origSize   = v.Size,
-                        origCC     = v.CanCollide,
-                        origTransp = v.Transparency,
-                        origMass   = v.Massless,
-                    }
+                    table.insert(entries, {
+                        part     = v,
+                        origSize = v.Size,
+                        origCC   = v.CanCollide,
+                        origMass = v.Massless,
+                        origLTM  = v.LocalTransparencyModifier,
+                    })
                     v.Size         = Vector3.new(size, size, size)
                     v.CanCollide   = false
                     v.Massless     = true
-                    v.LocalTransparencyModifier = State.HitboxAlpha
-                    table.insert(entries, entry)
+                    v.LocalTransparencyModifier = 1
                 end)
             end
         end
@@ -925,18 +922,16 @@ local function applyHitbox(player)
 
     if #entries == 0 then return end
 
-    -- Heartbeat leve: apenas garante CanCollide=false e atualiza transparência
     local conn = RunService.Heartbeat:Connect(function()
         if not hrp or not hrp.Parent then
             removeHitbox(player); return
         end
-        local ns    = math.max(State.HitboxSize or 10, 1)
-        local alpha = State.HitboxAlpha
+        local ns = math.max(State.HitboxSize or 10, 1)
         for _, e in ipairs(entries) do
             if e.part and e.part.Parent then
-                e.part.CanCollide = false
-                e.part.Massless   = true
-                e.part.LocalTransparencyModifier = alpha
+                e.part.CanCollide              = false
+                e.part.Massless                = true
+                e.part.LocalTransparencyModifier = 1
                 if e.part.Size.X ~= ns then
                     e.part.Size = Vector3.new(ns, ns, ns)
                 end
@@ -1605,12 +1600,13 @@ do
     })
 
     TabCombat:Slider({
-        Title = "Transparência",
-        Desc  = "1 = invisível  |  0 = laranja visível",
+        Title = "Debug Visual",
+        Desc  = "0 = mostra hitbox laranja  |  1 = invisível (padrão)",
         Step  = 0.05,
         Value = { Min = 0, Max = 1, Default = 1 },
         Callback = function(v)
             State.HitboxAlpha = v
+            -- Mostra/esconde as parts expandidas para debug
             for _, d in pairs(hitboxData) do
                 for _, e in ipairs(d.entries or {}) do
                     pcall(function()
