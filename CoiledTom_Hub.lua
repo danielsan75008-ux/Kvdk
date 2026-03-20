@@ -821,24 +821,22 @@ local function getBox(char)
 end
 
 -- ══════════════════════════════════════════════════════
---  HITBOX — Part separada no workspace
+--  HITBOX EXPANDER — versão limpa e definitiva
 --
+--  O que faz:
+--  1. Expande o Size do HRP do inimigo
+--  2. Desliga CanCollide em TODAS as BaseParts do char
+--     → o inimigo fica sem colisão física com TUDO
+--     → não empurra você, não te trava
+--  3. Heartbeat garante que CanCollide permanece false
+--  4. Restaura tudo ao desativar
 -- ══════════════════════════════════════════════════════
---  HITBOX — Técnica: HRP Teleport (única que funciona)
---
---  Teleporta o HumanoidRootPart do inimigo para dentro
---  do LocalPlayer a cada Heartbeat. O servidor processa
---  dano na posição do HRP → qualquer tiro acerta.
---  Part laranja é só visual. Restaura ao desativar.
--- ══════════════════════════════════════════════════════
-local hitboxData = {}  -- [player] = { conn, origCF, fakePart }
-
-local HB_GROUP = "CTHitbox"
-pcall(function()
-    PhysicsService:RegisterCollisionGroup(HB_GROUP)
-    PhysicsService:CollisionGroupSetCollidable(HB_GROUP, HB_GROUP,  false)
-    PhysicsService:CollisionGroupSetCollidable(HB_GROUP, "Default", false)
-end)
+local hitboxData = {}
+-- hitboxData[player] = {
+--   saved = { {part, origSize, origCC, origMass} },
+--   conn  = RBXScriptConnection,
+--   hl    = Highlight,
+-- }
 
 local HITBOX_PARTS = {
     ["Corpo Inteiro (Root)"] = { r15 = "HumanoidRootPart", r6 = "HumanoidRootPart" },
@@ -857,13 +855,13 @@ local function detectRig(char)
     else return "custom" end
 end
 
-local function findAnchorPart(char, sel)
+local function getTargetPart(char)
+    local sel   = State.HitboxPart or "Corpo Inteiro (Root)"
     local rig   = detectRig(char)
     local entry = HITBOX_PARTS[sel]
     if entry then
-        local name  = entry[rig] or entry.r15 or entry.r6
-        local found = char:FindFirstChild(name)
-        if found and found:IsA("BasePart") then return found end
+        local p = char:FindFirstChild(entry[rig] or entry.r15 or entry.r6)
+        if p and p:IsA("BasePart") then return p end
     end
     for _, fb in ipairs({"HumanoidRootPart","Torso","UpperTorso","Head"}) do
         local p = char:FindFirstChild(fb)
@@ -872,32 +870,21 @@ local function findAnchorPart(char, sel)
     return nil
 end
 
-local function getAnchorForSel(char, sel)
-    if sel == "Corpo Inteiro (Root)" then
-        return char:FindFirstChild("HumanoidRootPart")
-            or char:FindFirstChild("Torso")
-    else
-        return findAnchorPart(char, sel)
-    end
-end
-
 local function removeHitbox(player)
     local d = hitboxData[player]
     if not d then return end
     if d.conn then d.conn:Disconnect() end
-    -- Remove part visual
-    if d.fakePart and d.fakePart.Parent then
-        pcall(function() d.fakePart:Destroy() end)
+    if d.hl and d.hl.Parent then pcall(function() d.hl:Destroy() end) end
+    -- Restaura todas as parts salvas
+    for _, s in ipairs(d.saved or {}) do
+        pcall(function()
+            if s.part and s.part.Parent then
+                s.part.Size       = s.origSize
+                s.part.CanCollide = s.origCC
+                s.part.Massless   = s.origMass
+            end
+        end)
     end
-    -- Restaura CFrame original do HRP
-    pcall(function()
-        local char = player.Character
-        if char and d.origCF then
-            local hrp = char:FindFirstChild("HumanoidRootPart")
-                     or char:FindFirstChild("Torso")
-            if hrp then hrp.CFrame = d.origCF end
-        end
-    end)
     hitboxData[player] = nil
 end
 
@@ -908,57 +895,74 @@ local function applyHitbox(player)
     local char = player.Character
     if not char then return end
 
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-             or char:FindFirstChild("Torso")
-    if not hrp then return end
+    local target = getTargetPart(char)
+    if not target then return end
 
-    local origCF = hrp.CFrame
-    local col    = Color3.fromRGB(255, 140, 0)
+    local size = math.max(State.HitboxSize or 5, 1)
+    local saved = {}
 
-    -- Part visual (só aparece quando Transparência < 1)
-    local fake = Instance.new("Part")
-    fake.Name         = "_CTHitbox"
-    fake.Size         = Vector3.new(State.HitboxSize, State.HitboxSize, State.HitboxSize)
-    fake.Anchored     = false
-    fake.CanCollide   = false
-    fake.Massless     = true
-    fake.Transparency = State.HitboxAlpha
-    fake.Color        = col
-    fake.Material     = Enum.Material.SmoothPlastic
-    fake.CastShadow   = false
-    fake.CFrame       = hrp.CFrame
-    fake.Parent       = char
-    pcall(function() fake.CollisionGroup = HB_GROUP end)
+    -- Coleta TODAS as BaseParts do char
+    local allParts = {}
+    for _, v in ipairs(char:GetDescendants()) do
+        if v:IsA("BasePart") then
+            table.insert(allParts, v)
+        end
+    end
 
-    local weld  = Instance.new("Weld")
-    weld.Part0  = hrp
-    weld.Part1  = fake
-    weld.C0     = CFrame.new()
-    weld.C1     = CFrame.new()
-    weld.Parent = fake
+    for _, part in ipairs(allParts) do
+        pcall(function()
+            table.insert(saved, {
+                part     = part,
+                origSize = part.Size,
+                origCC   = part.CanCollide,
+                origMass = part.Massless,
+            })
+            -- Desliga colisão em todas → não empurra, não trava
+            part.CanCollide = false
+            part.Massless   = true
+        end)
+    end
 
-    -- Loop: teleporta HRP do inimigo para dentro do LocalPlayer
+    -- Expande só o target (HRP ou parte selecionada)
+    pcall(function()
+        target.Size = Vector3.new(size, size, size)
+    end)
+
+    -- Visual: Highlight laranja no target
+    local hl = Instance.new("Highlight")
+    hl.Adornee             = target
+    hl.FillColor           = Color3.fromRGB(255, 140, 0)
+    hl.OutlineColor        = Color3.fromRGB(255, 200, 0)
+    hl.FillTransparency    = State.HitboxAlpha
+    hl.OutlineTransparency = State.HitboxAlpha >= 1 and 1 or 0
+    hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
+    hl.Parent              = char
+
+    -- Heartbeat: mantém CanCollide=false e atualiza tamanho
     local conn = RunService.Heartbeat:Connect(function()
-        if not hrp or not hrp.Parent then
+        if not target or not target.Parent then
             removeHitbox(player); return
         end
-        local myRoot = getRoot()
-        if not myRoot then return end
-        -- HRP do inimigo vai para dentro de você
-        hrp.CFrame = myRoot.CFrame
-        -- Atualiza visual
-        if fake and fake.Parent then
-            fake.Transparency = State.HitboxAlpha
-            fake.CanCollide   = false
-            fake.Massless     = true
-            local s = State.HitboxSize
-            if fake.Size.X ~= s then
-                fake.Size = Vector3.new(s, s, s)
+        -- Força CanCollide=false em todas as parts do char
+        for _, v in ipairs(char:GetDescendants()) do
+            if v:IsA("BasePart") then
+                v.CanCollide = false
+                v.Massless   = true
             end
+        end
+        -- Atualiza tamanho se mudou
+        local ns = math.max(State.HitboxSize or 5, 1)
+        if target.Size.X ~= ns then
+            target.Size = Vector3.new(ns, ns, ns)
+        end
+        -- Atualiza visual
+        if hl and hl.Parent then
+            hl.FillTransparency    = State.HitboxAlpha
+            hl.OutlineTransparency = State.HitboxAlpha >= 1 and 1 or 0
         end
     end)
 
-    hitboxData[player] = { conn = conn, origCF = origCF, fakePart = fake }
+    hitboxData[player] = { saved = saved, conn = conn, hl = hl }
 end
 
 local function startHitboxSync() end
@@ -1633,16 +1637,16 @@ do
 
     TabCombat:Slider({
         Title = "Transparência",
-        Desc  = "0 = laranja visível  |  1 = completamente invisível",
+        Desc  = "0 = laranja visível  |  1 = invisível",
         Step  = 0.05,
         Value = { Min = 0, Max = 1, Default = 1 },
         Callback = function(v)
             State.HitboxAlpha = v
-            -- Atualiza em tempo real
             for _, d in pairs(hitboxData) do
                 pcall(function()
-                    if d.fakePart and d.fakePart.Parent then
-                        d.fakePart.Transparency = v
+                    if d.hl and d.hl.Parent then
+                        d.hl.FillTransparency    = v
+                        d.hl.OutlineTransparency = v >= 1 and 1 or 0
                     end
                 end)
             end
