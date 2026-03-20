@@ -849,11 +849,14 @@ end
 
 local function startHitbox()
     if hitboxConn then return end
-    hitboxConn = RunService.RenderStepped:Connect(function()
+    hitboxConn = RunService.Heartbeat:Connect(function()
+        if not State.HitboxEnabled then return end
         for _, pl in ipairs(Players:GetPlayers()) do
             if pl == LocalPlayer then continue end
             pcall(function()
-                local hrp = pl.Character and pl.Character:FindFirstChild("HumanoidRootPart")
+                local char = pl.Character
+                if not char then return end
+                local hrp = char:FindFirstChild("HumanoidRootPart")
                 if not hrp then return end
                 local s = State.HitboxSize or 10
                 hrp.Size         = Vector3.new(s, s, s)
