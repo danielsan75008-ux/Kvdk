@@ -63,9 +63,9 @@ local State = {
     DistESP       = false,
     HealthESP     = false,
     HitboxEnabled = false,
-    HitboxSize    = 5,
-    HitboxAlpha   = 1,
-    HitboxPart    = "HumanoidRootPart",
+    HitboxSize    = 10,
+    HitboxAlpha   = 0.7,
+    HitboxColor   = "Really red",
     AntiLag          = false,
     FPSBoost         = false,
     DisableParticles = false,
@@ -821,135 +821,61 @@ local function getBox(char)
 end
 
 -- ══════════════════════════════════════════════════════
---  HITBOX EXPANDER
---
---  Expande as parts ORIGINAIS do personagem inimigo.
---  O servidor conhece essas parts → dano funciona.
---  CanCollide = false em todas → não trava, não colide.
---  Transparency = 1 (invisível para você).
---  Restaura tudo ao desativar.
+--  HITBOX — baseado no método que funciona
+--  RenderStepped: expande HRP, Transparency, CanCollide
 -- ══════════════════════════════════════════════════════
-local hitboxData = {}
--- hitboxData[player] = {
---   entries = { {part, origSize, origCC, origTransp} },
---   conn    = RBXScriptConnection,
--- }
+local hitboxData    = {}   -- não usado, mantido para compatibilidade
+local hitboxConn    = nil  -- conexão única do RenderStepped
 
-local function removeHitbox(player)
-    local d = hitboxData[player]
-    if not d then return end
-    if d.conn then d.conn:Disconnect() end
-    for _, e in ipairs(d.entries or {}) do
+local function removeHitbox()
+    if hitboxConn then
+        hitboxConn:Disconnect()
+        hitboxConn = nil
+    end
+    -- Restaura HRP de todos os players
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl == LocalPlayer then continue end
         pcall(function()
-            if e.part and e.part.Parent then
-                e.part.Size                      = e.origSize
-                e.part.CanCollide                = e.origCC
-                e.part.Massless                  = e.origMass
-                e.part.LocalTransparencyModifier = e.origLTM or 0
+            local hrp = pl.Character and pl.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                hrp.Size         = Vector3.new(2, 2, 1)   -- tamanho padrão HRP
+                hrp.Transparency = 1                        -- HRP é invisível por padrão
+                hrp.CanCollide   = false
+                hrp.Material     = Enum.Material.SmoothPlastic
             end
         end)
     end
-    hitboxData[player] = nil
 end
 
-local function applyHitbox(player)
-    if player == LocalPlayer then return end
-    removeHitbox(player)
-
-    local char = player.Character
-    if not char then return end
-
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-             or char:FindFirstChild("Torso")
-    if not hrp then return end
-
-    local size = math.max(State.HitboxSize or 10, 1)
-
-    local partNames = {
-        "HumanoidRootPart","Head",
-        "UpperTorso","LowerTorso","Torso",
-        "LeftUpperArm","RightUpperArm","LeftLowerArm","RightLowerArm",
-        "LeftHand","RightHand",
-        "LeftUpperLeg","RightUpperLeg","LeftLowerLeg","RightLowerLeg",
-        "LeftFoot","RightFoot",
-        "Left Arm","Right Arm","Left Leg","Right Leg",
-    }
-
-    local entries = {}
-
-    for _, name in ipairs(partNames) do
-        local part = char:FindFirstChild(name)
-        if part and part:IsA("BasePart") then
+local function startHitbox()
+    if hitboxConn then return end
+    hitboxConn = RunService.RenderStepped:Connect(function()
+        for _, pl in ipairs(Players:GetPlayers()) do
+            if pl == LocalPlayer then continue end
             pcall(function()
-                table.insert(entries, {
-                    part     = part,
-                    origSize = part.Size,
-                    origCC   = part.CanCollide,
-                    origMass = part.Massless,
-                    origLTM  = part.LocalTransparencyModifier,
-                })
-                part.Size         = Vector3.new(size, size, size)
-                part.CanCollide   = false
-                part.Massless     = true
-                -- SEMPRE invisível para o cliente:
-                -- as parts expandidas ficam escondidas, personagem animado
-                -- continua visível através dos MeshParts/accessories que
-                -- não foram expandidos
-                part.LocalTransparencyModifier = 1
+                local hrp = pl.Character and pl.Character:FindFirstChild("HumanoidRootPart")
+                if not hrp then return end
+                local s = State.HitboxSize or 10
+                hrp.Size         = Vector3.new(s, s, s)
+                hrp.Transparency = State.HitboxAlpha
+                hrp.BrickColor   = BrickColor.new(State.HitboxColor or "Really red")
+                hrp.Material     = Enum.Material.Neon
+                hrp.CanCollide   = false
             end)
         end
-    end
-
-    if #entries == 0 then
-        for _, v in ipairs(char:GetChildren()) do
-            if v:IsA("BasePart") then
-                pcall(function()
-                    table.insert(entries, {
-                        part     = v,
-                        origSize = v.Size,
-                        origCC   = v.CanCollide,
-                        origMass = v.Massless,
-                        origLTM  = v.LocalTransparencyModifier,
-                    })
-                    v.Size         = Vector3.new(size, size, size)
-                    v.CanCollide   = false
-                    v.Massless     = true
-                    v.LocalTransparencyModifier = 1
-                end)
-            end
-        end
-    end
-
-    if #entries == 0 then return end
-
-    local conn = RunService.Heartbeat:Connect(function()
-        if not hrp or not hrp.Parent then
-            removeHitbox(player); return
-        end
-        local ns = math.max(State.HitboxSize or 10, 1)
-        for _, e in ipairs(entries) do
-            if e.part and e.part.Parent then
-                e.part.CanCollide              = false
-                e.part.Massless                = true
-                e.part.LocalTransparencyModifier = 1
-                if e.part.Size.X ~= ns then
-                    e.part.Size = Vector3.new(ns, ns, ns)
-                end
-            end
-        end
     end)
-
-    hitboxData[player] = { entries = entries, conn = conn }
 end
 
-local function startHitboxSync() end
-local function stopHitboxSync()  end
+-- Manter compatibilidade com chamadas existentes
+local function applyHitbox(player)   end
+local function startHitboxSync()     end
+local function stopHitboxSync()      end
 
 local function refreshHitboxes()
-    for _, pl in ipairs(Players:GetPlayers()) do
-        if pl == LocalPlayer then continue end
-        if State.HitboxEnabled then applyHitbox(pl)
-        else removeHitbox(pl) end
+    if State.HitboxEnabled then
+        startHitbox()
+    else
+        removeHitbox()
     end
 end
 
@@ -1567,55 +1493,54 @@ do
 
     TabCombat:Toggle({
         Title = "Hitbox Expander",
-        Desc  = "Aumenta a hitbox dos players na parte selecionada",
+        Desc  = "Expande o HRP de todos os players",
         Value = false,
         Callback = function(v)
             State.HitboxEnabled = v
             if v then
-                refreshHitboxes()
-                startHitboxSync()
+                startHitbox()
             else
-                stopHitboxSync()
-                refreshHitboxes()
+                removeHitbox()
             end
         end,
     })
 
     TabCombat:Slider({
         Title = "Tamanho",
-        Desc  = "Tamanho da hitbox em volta do corpo",
+        Desc  = "Tamanho do HumanoidRootPart expandido",
         Step  = 1,
-        Value = { Min = 1, Max = 50, Default = 10 },
+        Value = { Min = 1, Max = 100, Default = 10 },
         Callback = function(v)
             State.HitboxSize = v
-            -- Atualiza em tempo real sem reaplica
-            for _, d in pairs(hitboxData) do
-                pcall(function()
-                    if d.part and d.part.Parent then
-                        d.part.Size = Vector3.new(v, v, v)
-                    end
-                end)
-            end
         end,
     })
 
     TabCombat:Slider({
-        Title = "Debug Visual",
-        Desc  = "0 = mostra hitbox laranja  |  1 = invisível (padrão)",
+        Title = "Transparência",
+        Desc  = "0 = sólido visível  |  1 = invisível",
         Step  = 0.05,
-        Value = { Min = 0, Max = 1, Default = 1 },
+        Value = { Min = 0, Max = 1, Default = 0.7 },
         Callback = function(v)
             State.HitboxAlpha = v
-            -- Mostra/esconde as parts expandidas para debug
-            for _, d in pairs(hitboxData) do
-                for _, e in ipairs(d.entries or {}) do
-                    pcall(function()
-                        if e.part and e.part.Parent then
-                            e.part.LocalTransparencyModifier = v
-                        end
-                    end)
-                end
-            end
+        end,
+    })
+
+    TabCombat:Dropdown({
+        Title  = "Cor da Hitbox",
+        Desc   = "Cor do HRP expandido",
+        Values = {
+            "Really red",
+            "Bright orange",
+            "Bright yellow",
+            "Lime green",
+            "Cyan",
+            "Really blue",
+            "Hot pink",
+            "White",
+        },
+        Value    = "Really red",
+        Callback = function(v)
+            State.HitboxColor = v
         end,
     })
 end
