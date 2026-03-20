@@ -823,25 +823,21 @@ end
 -- ══════════════════════════════════════════════════════
 --  HITBOX — Part separada no workspace
 --
---  Por que essa abordagem:
---  • NÃO toca em nenhuma part do personagem inimigo
---    → nunca trava o player, nunca afeta a física dele
---  • Uma Part grande no workspace, ancorada=false,
---    CanCollide=false, seguindo o HRP via CFrame no
---    Heartbeat → raycasts do jogo batem nela
---  • Funciona de dentro e de fora pois a Part cobre
---    todo o espaço ao redor do HRP
---  • Transparência controlada pelo slider
 -- ══════════════════════════════════════════════════════
-local hitboxData    = {}   -- [player] = { fakePart=Part, conn=Connection }
-local hitboxSyncConn = nil
+--  HITBOX — Técnica: HRP Teleport (única que funciona)
+--
+--  Teleporta o HumanoidRootPart do inimigo para dentro
+--  do LocalPlayer a cada Heartbeat. O servidor processa
+--  dano na posição do HRP → qualquer tiro acerta.
+--  Part laranja é só visual. Restaura ao desativar.
+-- ══════════════════════════════════════════════════════
+local hitboxData = {}  -- [player] = { conn, origCF, fakePart }
 
 local HB_GROUP = "CTHitbox"
 pcall(function()
     PhysicsService:RegisterCollisionGroup(HB_GROUP)
-    PhysicsService:CollisionGroupSetCollidable(HB_GROUP, HB_GROUP,    false)
-    PhysicsService:CollisionGroupSetCollidable(HB_GROUP, "Default",   false)
-    PhysicsService:CollisionGroupSetCollidable(HB_GROUP, "Players",   false)
+    PhysicsService:CollisionGroupSetCollidable(HB_GROUP, HB_GROUP,  false)
+    PhysicsService:CollisionGroupSetCollidable(HB_GROUP, "Default", false)
 end)
 
 local HITBOX_PARTS = {
@@ -878,7 +874,6 @@ end
 
 local function getAnchorForSel(char, sel)
     if sel == "Corpo Inteiro (Root)" then
-        -- Para "corpo inteiro" usa o HRP como centro único
         return char:FindFirstChild("HumanoidRootPart")
             or char:FindFirstChild("Torso")
     else
@@ -890,9 +885,19 @@ local function removeHitbox(player)
     local d = hitboxData[player]
     if not d then return end
     if d.conn then d.conn:Disconnect() end
+    -- Remove part visual
     if d.fakePart and d.fakePart.Parent then
-        d.fakePart:Destroy()
+        pcall(function() d.fakePart:Destroy() end)
     end
+    -- Restaura CFrame original do HRP
+    pcall(function()
+        local char = player.Character
+        if char and d.origCF then
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+                     or char:FindFirstChild("Torso")
+            if hrp then hrp.CFrame = d.origCF end
+        end
+    end)
     hitboxData[player] = nil
 end
 
@@ -903,55 +908,60 @@ local function applyHitbox(player)
     local char = player.Character
     if not char then return end
 
-    local anchor = getAnchorForSel(char, State.HitboxPart or "Corpo Inteiro (Root)")
-    if not anchor then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+             or char:FindFirstChild("Torso")
+    if not hrp then return end
 
-    local size  = State.HitboxSize  or 5
-    local alpha = State.HitboxAlpha or 1
-    local col   = Color3.fromRGB(255, 140, 0)
+    local origCF = hrp.CFrame
+    local col    = Color3.fromRGB(255, 140, 0)
 
-    -- Part DENTRO do character (para raycasts de dano a encontrarem)
-    -- mas com CanCollide=false e Massless=true → não afeta física, não trava
+    -- Part visual (só aparece quando Transparência < 1)
     local fake = Instance.new("Part")
     fake.Name         = "_CTHitbox"
-    fake.Size         = Vector3.new(size, size, size)
+    fake.Size         = Vector3.new(State.HitboxSize, State.HitboxSize, State.HitboxSize)
     fake.Anchored     = false
     fake.CanCollide   = false
     fake.Massless     = true
-    fake.Transparency = alpha
+    fake.Transparency = State.HitboxAlpha
     fake.Color        = col
     fake.Material     = Enum.Material.SmoothPlastic
     fake.CastShadow   = false
-    fake.CFrame       = anchor.CFrame
-    fake.Parent       = char   -- dentro do char: dano detecta, física não
-
+    fake.CFrame       = hrp.CFrame
+    fake.Parent       = char
     pcall(function() fake.CollisionGroup = HB_GROUP end)
 
-    -- Weld para seguir o anchor perfeitamente sem usar física
-    local weld    = Instance.new("Weld")
-    weld.Part0    = anchor
-    weld.Part1    = fake
-    weld.C0       = CFrame.new()
-    weld.C1       = CFrame.new()
-    weld.Parent   = fake
+    local weld  = Instance.new("Weld")
+    weld.Part0  = hrp
+    weld.Part1  = fake
+    weld.C0     = CFrame.new()
+    weld.C1     = CFrame.new()
+    weld.Parent = fake
 
-    -- Heartbeat garante CanCollide=false e Size corretos a cada frame
+    -- Loop: teleporta HRP do inimigo para dentro do LocalPlayer
     local conn = RunService.Heartbeat:Connect(function()
-        if not fake or not fake.Parent then return end
-        if not anchor or not anchor.Parent then
+        if not hrp or not hrp.Parent then
             removeHitbox(player); return
         end
-        fake.CanCollide = false
-        fake.Massless   = true
-        if fake.Size ~= Vector3.new(State.HitboxSize, State.HitboxSize, State.HitboxSize) then
-            fake.Size = Vector3.new(State.HitboxSize, State.HitboxSize, State.HitboxSize)
+        local myRoot = getRoot()
+        if not myRoot then return end
+        -- HRP do inimigo vai para dentro de você
+        hrp.CFrame = myRoot.CFrame
+        -- Atualiza visual
+        if fake and fake.Parent then
+            fake.Transparency = State.HitboxAlpha
+            fake.CanCollide   = false
+            fake.Massless     = true
+            local s = State.HitboxSize
+            if fake.Size.X ~= s then
+                fake.Size = Vector3.new(s, s, s)
+            end
         end
     end)
 
-    hitboxData[player] = { fakePart = fake, conn = conn }
+    hitboxData[player] = { conn = conn, origCF = origCF, fakePart = fake }
 end
 
-local function startHitboxSync() end  -- já é por player
+local function startHitboxSync() end
 local function stopHitboxSync()  end
 
 local function refreshHitboxes()
