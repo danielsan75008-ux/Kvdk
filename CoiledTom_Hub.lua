@@ -910,38 +910,42 @@ local function applyHitbox(player)
     local alpha = State.HitboxAlpha or 1
     local col   = Color3.fromRGB(255, 140, 0)
 
-    -- Cria uma Part SEPARADA no workspace — não toca no char
+    -- Part DENTRO do character (para raycasts de dano a encontrarem)
+    -- mas com CanCollide=false e Massless=true → não afeta física, não trava
     local fake = Instance.new("Part")
     fake.Name         = "_CTHitbox"
     fake.Size         = Vector3.new(size, size, size)
     fake.Anchored     = false
-    fake.CanCollide   = false   -- sem colisão física — não trava ninguém
+    fake.CanCollide   = false
     fake.Massless     = true
     fake.Transparency = alpha
     fake.Color        = col
     fake.Material     = Enum.Material.SmoothPlastic
     fake.CastShadow   = false
     fake.CFrame       = anchor.CFrame
-    fake.Parent       = workspace
+    fake.Parent       = char   -- dentro do char: dano detecta, física não
 
-    -- Collision group: não colide com nada fisicamente
     pcall(function() fake.CollisionGroup = HB_GROUP end)
 
-    -- Loop que mantém a fake Part exatamente em cima do anchor
-    -- Isso faz funcionar de DENTRO e de FORA:
-    -- a Part cobre o espaço todo → qualquer raycast a encontra
+    -- Weld para seguir o anchor perfeitamente sem usar física
+    local weld    = Instance.new("Weld")
+    weld.Part0    = anchor
+    weld.Part1    = fake
+    weld.C0       = CFrame.new()
+    weld.C1       = CFrame.new()
+    weld.Parent   = fake
+
+    -- Heartbeat garante CanCollide=false e Size corretos a cada frame
     local conn = RunService.Heartbeat:Connect(function()
         if not fake or not fake.Parent then return end
         if not anchor or not anchor.Parent then
             removeHitbox(player); return
         end
-        fake.CFrame       = anchor.CFrame
-        fake.Size         = Vector3.new(
-            State.HitboxSize, State.HitboxSize, State.HitboxSize
-        )
-        fake.Transparency = State.HitboxAlpha
-        fake.CanCollide   = false
-        fake.Massless     = true
+        fake.CanCollide = false
+        fake.Massless   = true
+        if fake.Size ~= Vector3.new(State.HitboxSize, State.HitboxSize, State.HitboxSize) then
+            fake.Size = Vector3.new(State.HitboxSize, State.HitboxSize, State.HitboxSize)
+        end
     end)
 
     hitboxData[player] = { fakePart = fake, conn = conn }
