@@ -821,26 +821,34 @@ local function getBox(char)
 end
 
 -- ══════════════════════════════════════════════════════
---  HITBOX EXPANDER — definitivo
+--  HITBOX EXPANDER
 --
---  Abordagem:
---  • Cria UMA Part grande (transparente) por player
---  • Soldada ao HRP via Weld (segue perfeitamente)
---  • CanCollide = false SEMPRE → zero colisão
---  • Massless   = true  SEMPRE → zero impacto na física
---  • Transparência controlada pelo slider (visual)
---  • Não modifica NENHUMA part original do inimigo
---  • Atualiza ao respawn via CharacterAdded
---  • Leve: 1 Heartbeat por player, sem GetDescendants
+--  Expande as parts ORIGINAIS do personagem inimigo.
+--  O servidor conhece essas parts → dano funciona.
+--  CanCollide = false em todas → não trava, não colide.
+--  Transparency = 1 (invisível para você).
+--  Restaura tudo ao desativar.
 -- ══════════════════════════════════════════════════════
 local hitboxData = {}
--- hitboxData[player] = { part=Part, weld=Weld, conn=Connection }
+-- hitboxData[player] = {
+--   entries = { {part, origSize, origCC, origTransp} },
+--   conn    = RBXScriptConnection,
+-- }
 
 local function removeHitbox(player)
     local d = hitboxData[player]
     if not d then return end
     if d.conn then d.conn:Disconnect() end
-    pcall(function() if d.part and d.part.Parent then d.part:Destroy() end end)
+    for _, e in ipairs(d.entries or {}) do
+        pcall(function()
+            if e.part and e.part.Parent then
+                e.part.Size         = e.origSize
+                e.part.CanCollide   = e.origCC
+                e.part.Transparency = e.origTransp
+                e.part.Massless     = e.origMass
+            end
+        end)
+    end
     hitboxData[player] = nil
 end
 
@@ -851,60 +859,92 @@ local function applyHitbox(player)
     local char = player.Character
     if not char then return end
 
-    -- Aguarda HRP
     local hrp = char:FindFirstChild("HumanoidRootPart")
-           or  char:FindFirstChild("Torso")
+             or char:FindFirstChild("Torso")
     if not hrp then return end
 
-    local size = math.max(State.HitboxSize or 5, 1)
+    local size = math.max(State.HitboxSize or 10, 1)
 
-    -- Cria a part hitbox
-    local p = Instance.new("Part")
-    p.Name         = "_CTHitbox"
-    p.Size         = Vector3.new(size, size, size)
-    p.CFrame       = hrp.CFrame
-    p.Anchored     = false
-    p.CanCollide   = false    -- nunca colide com nada
-    p.Massless     = true     -- zero impacto na física
-    p.Transparency = 1        -- completamente invisível por padrão
-    p.CastShadow   = false
-    p.Parent       = char     -- filho do char: detectado como parte do modelo
+    -- Lista das parts principais (R15 + R6 + fallback)
+    local partNames = {
+        "HumanoidRootPart","Head",
+        "UpperTorso","LowerTorso","Torso",
+        "LeftUpperArm","RightUpperArm","LeftLowerArm","RightLowerArm",
+        "LeftHand","RightHand",
+        "LeftUpperLeg","RightUpperLeg","LeftLowerLeg","RightLowerLeg",
+        "LeftFoot","RightFoot",
+        "Left Arm","Right Arm","Left Leg","Right Leg",
+    }
 
-    -- Weld: segue o HRP perfeitamente sem usar física
-    local w = Instance.new("Weld")
-    w.Part0  = hrp
-    w.Part1  = p
-    w.C0     = CFrame.new()
-    w.C1     = CFrame.new()
-    w.Parent = p
+    local entries = {}
 
-    -- Heartbeat leve: só garante propriedades e atualiza Size/visual
-    local conn = RunService.Heartbeat:Connect(function()
-        if not p or not p.Parent then
-            removeHitbox(player); return
+    for _, name in ipairs(partNames) do
+        local part = char:FindFirstChild(name)
+        if part and part:IsA("BasePart") then
+            pcall(function()
+                local entry = {
+                    part       = part,
+                    origSize   = part.Size,
+                    origCC     = part.CanCollide,
+                    origTransp = part.Transparency,
+                    origMass   = part.Massless,
+                }
+                -- Expande a part original (servidor detecta)
+                part.Size         = Vector3.new(size, size, size)
+                -- Sem colisão → não trava, não empurra
+                part.CanCollide   = false
+                part.Massless     = true
+                -- Invisível para o cliente local
+                part.LocalTransparencyModifier = State.HitboxAlpha
+                table.insert(entries, entry)
+            end)
         end
+    end
+
+    -- Se não achou nenhuma, usa qualquer BasePart
+    if #entries == 0 then
+        for _, v in ipairs(char:GetChildren()) do
+            if v:IsA("BasePart") then
+                pcall(function()
+                    local entry = {
+                        part       = v,
+                        origSize   = v.Size,
+                        origCC     = v.CanCollide,
+                        origTransp = v.Transparency,
+                        origMass   = v.Massless,
+                    }
+                    v.Size         = Vector3.new(size, size, size)
+                    v.CanCollide   = false
+                    v.Massless     = true
+                    v.LocalTransparencyModifier = State.HitboxAlpha
+                    table.insert(entries, entry)
+                end)
+            end
+        end
+    end
+
+    if #entries == 0 then return end
+
+    -- Heartbeat leve: apenas garante CanCollide=false e atualiza transparência
+    local conn = RunService.Heartbeat:Connect(function()
         if not hrp or not hrp.Parent then
             removeHitbox(player); return
         end
-
-        -- Garante que nada reverteu
-        if p.CanCollide then p.CanCollide = false end
-        if not p.Massless then p.Massless = true end
-
-        -- Atualiza size se slider mudou
-        local ns = math.max(State.HitboxSize or 5, 1)
-        if p.Size.X ~= ns then
-            p.Size = Vector3.new(ns, ns, ns)
-        end
-
-        -- Transparência: 1 = invisível, 0 = laranja visível
+        local ns    = math.max(State.HitboxSize or 10, 1)
         local alpha = State.HitboxAlpha
-        if p.Transparency ~= alpha then
-            p.Transparency = alpha
+        for _, e in ipairs(entries) do
+            if e.part and e.part.Parent then
+                e.part.CanCollide = false
+                e.part.Massless   = true
+                e.part.LocalTransparencyModifier = alpha
+                if e.part.Size.X ~= ns then
+                    e.part.Size = Vector3.new(ns, ns, ns)
+                end
+            end
         end
     end)
 
-    hitboxData[player] = { part = p, weld = w, conn = conn }
+    hitboxData[player] = { entries = entries, conn = conn }
 end
 
 local function startHitboxSync() end
@@ -1572,11 +1612,13 @@ do
         Callback = function(v)
             State.HitboxAlpha = v
             for _, d in pairs(hitboxData) do
-                pcall(function()
-                    if d.part and d.part.Parent then
-                        d.part.Transparency = v
-                    end
-                end)
+                for _, e in ipairs(d.entries or {}) do
+                    pcall(function()
+                        if e.part and e.part.Parent then
+                            e.part.LocalTransparencyModifier = v
+                        end
+                    end)
+                end
             end
         end,
     })
