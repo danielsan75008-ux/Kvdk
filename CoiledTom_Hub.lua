@@ -875,7 +875,7 @@ local function removeHitbox(player)
     if not d then return end
     if d.conn then d.conn:Disconnect() end
     if d.hl and d.hl.Parent then pcall(function() d.hl:Destroy() end) end
-    -- Restaura todas as parts salvas
+    -- Restaura todas as parts
     for _, s in ipairs(d.saved or {}) do
         pcall(function()
             if s.part and s.part.Parent then
@@ -885,6 +885,12 @@ local function removeHitbox(player)
             end
         end)
     end
+    -- Restaura transparência local da target
+    pcall(function()
+        if d.target and d.target.Parent then
+            d.target.LocalTransparencyModifier = 0
+        end
+    end)
     hitboxData[player] = nil
 end
 
@@ -898,37 +904,36 @@ local function applyHitbox(player)
     local target = getTargetPart(char)
     if not target then return end
 
-    local size = math.max(State.HitboxSize or 5, 1)
+    local size  = math.max(State.HitboxSize or 5, 1)
     local saved = {}
 
-    -- Coleta TODAS as BaseParts do char
-    local allParts = {}
-    for _, v in ipairs(char:GetDescendants()) do
-        if v:IsA("BasePart") then
-            table.insert(allParts, v)
+    -- Salva e desliga CanCollide em TODAS as parts de uma vez
+    -- Faz isso ANTES de expandir o Size para evitar 1 frame de colisão
+    for _, part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") then
+            pcall(function()
+                table.insert(saved, {
+                    part       = part,
+                    origSize   = part.Size,
+                    origCC     = part.CanCollide,
+                    origMass   = part.Massless,
+                    origTransp = part.LocalTransparencyModifier,
+                })
+                part.CanCollide = false
+                part.Massless   = true
+            end)
         end
     end
 
-    for _, part in ipairs(allParts) do
-        pcall(function()
-            table.insert(saved, {
-                part     = part,
-                origSize = part.Size,
-                origCC   = part.CanCollide,
-                origMass = part.Massless,
-            })
-            -- Desliga colisão em todas → não empurra, não trava
-            part.CanCollide = false
-            part.Massless   = true
-        end)
-    end
-
-    -- Expande só o target (HRP ou parte selecionada)
+    -- Agora expande o Size da part alvo
     pcall(function()
         target.Size = Vector3.new(size, size, size)
+        -- Invisível: LocalTransparencyModifier só afeta o cliente local
+        -- não o servidor, então não quebra nada
+        target.LocalTransparencyModifier = 1
     end)
 
-    -- Visual: Highlight laranja no target
+    -- Highlight laranja para visualização (só aparece se alpha < 1)
     local hl = Instance.new("Highlight")
     hl.Adornee             = target
     hl.FillColor           = Color3.fromRGB(255, 140, 0)
@@ -938,31 +943,32 @@ local function applyHitbox(player)
     hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
     hl.Parent              = char
 
-    -- Heartbeat: mantém CanCollide=false e atualiza tamanho
+    -- Heartbeat leve: só verifica target e atualiza tamanho/visual
+    -- NÃO itera char:GetDescendants() toda frame (pesado)
     local conn = RunService.Heartbeat:Connect(function()
         if not target or not target.Parent then
             removeHitbox(player); return
         end
-        -- Força CanCollide=false em todas as parts do char
-        for _, v in ipairs(char:GetDescendants()) do
-            if v:IsA("BasePart") then
-                v.CanCollide = false
-                v.Massless   = true
-            end
-        end
-        -- Atualiza tamanho se mudou
+
+        -- Mantém CanCollide=false apenas na target (mais leve)
+        target.CanCollide = false
+        target.Massless   = true
+        target.LocalTransparencyModifier = 1
+
+        -- Atualiza tamanho só se mudou
         local ns = math.max(State.HitboxSize or 5, 1)
         if target.Size.X ~= ns then
             target.Size = Vector3.new(ns, ns, ns)
         end
-        -- Atualiza visual
+
+        -- Atualiza Highlight
         if hl and hl.Parent then
             hl.FillTransparency    = State.HitboxAlpha
             hl.OutlineTransparency = State.HitboxAlpha >= 1 and 1 or 0
         end
     end)
 
-    hitboxData[player] = { saved = saved, conn = conn, hl = hl }
+    hitboxData[player] = { saved = saved, conn = conn, hl = hl, target = target }
 end
 
 local function startHitboxSync() end
