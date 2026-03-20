@@ -292,7 +292,7 @@ local function startFly()
         flyGyro.CFrame = cf
     end)
 end
-function stopFly()
+local function stopFly()
     if flyConn then flyConn:Disconnect(); flyConn = nil end
     if flyBody and flyBody.Parent then flyBody:Destroy() end
     if flyGyro and flyGyro.Parent then flyGyro:Destroy() end
@@ -870,26 +870,6 @@ local function startHitbox()
 end
 
 -- Reconecta hitbox sempre que um player entra ou respawna
-local function hookHitboxRespawn(pl)
-    pl.CharacterAdded:Connect(function()
-        if not State.HitboxEnabled then return end
-        -- Desliga e liga rapidinho para forçar reaplicação no novo char
-        if hitboxConn then hitboxConn:Disconnect(); hitboxConn = nil end
-        task.wait()
-        startHitbox()
-    end)
-end
-
--- Aplica para players já no jogo
-for _, pl in ipairs(Players:GetPlayers()) do
-    if pl ~= LocalPlayer then hookHitboxRespawn(pl) end
-end
-
--- Aplica para novos players
-Players.PlayerAdded:Connect(function(pl)
-    hookHitboxRespawn(pl)
-end)
-
 -- Manter compatibilidade com chamadas existentes
 local function applyHitbox(player)   end
 local function startHitboxSync()     end
@@ -1075,24 +1055,17 @@ end)
 local function connectCharacterEvents(pl)
     pl.CharacterAdded:Connect(function(char)
         buildESP(pl)
-        -- Reaplica Highlight imediatamente no respawn
         if State.ESPEnabled then
             task.spawn(function()
-                task.wait()   -- 1 frame para o char existir
+                task.wait()
                 applyHighlight(pl)
             end)
         end
+        -- Ciclo liga/desliga para forçar hitbox no novo char
         if State.HitboxEnabled then
-            local hrp = char:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                applyHitbox(pl)
-            else
-                char.ChildAdded:Connect(function(child)
-                    if child.Name == "HumanoidRootPart" and State.HitboxEnabled then
-                        applyHitbox(pl)
-                    end
-                end)
-            end
+            if hitboxConn then hitboxConn:Disconnect(); hitboxConn = nil end
+            task.wait()
+            startHitbox()
         end
         if State.ChamEnabled then applyCham(pl) end
     end)
