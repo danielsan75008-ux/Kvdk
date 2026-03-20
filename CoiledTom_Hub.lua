@@ -821,76 +821,26 @@ local function getBox(char)
 end
 
 -- ══════════════════════════════════════════════════════
---  HITBOX EXPANDER — versão limpa e definitiva
+--  HITBOX EXPANDER — definitivo
 --
---  O que faz:
---  1. Expande o Size do HRP do inimigo
---  2. Desliga CanCollide em TODAS as BaseParts do char
---     → o inimigo fica sem colisão física com TUDO
---     → não empurra você, não te trava
---  3. Heartbeat garante que CanCollide permanece false
---  4. Restaura tudo ao desativar
+--  Abordagem:
+--  • Cria UMA Part grande (transparente) por player
+--  • Soldada ao HRP via Weld (segue perfeitamente)
+--  • CanCollide = false SEMPRE → zero colisão
+--  • Massless   = true  SEMPRE → zero impacto na física
+--  • Transparência controlada pelo slider (visual)
+--  • Não modifica NENHUMA part original do inimigo
+--  • Atualiza ao respawn via CharacterAdded
+--  • Leve: 1 Heartbeat por player, sem GetDescendants
 -- ══════════════════════════════════════════════════════
 local hitboxData = {}
--- hitboxData[player] = {
---   saved = { {part, origSize, origCC, origMass} },
---   conn  = RBXScriptConnection,
---   hl    = Highlight,
--- }
-
-local HITBOX_PARTS = {
-    ["Corpo Inteiro (Root)"] = { r15 = "HumanoidRootPart", r6 = "HumanoidRootPart" },
-    ["Cabeça"]               = { r15 = "Head",             r6 = "Head"             },
-    ["Torso"]                = { r15 = "UpperTorso",        r6 = "Torso"            },
-    ["Torso Inferior"]       = { r15 = "LowerTorso",        r6 = "Torso"            },
-    ["Braço Esquerdo"]       = { r15 = "LeftUpperArm",      r6 = "Left Arm"         },
-    ["Braço Direito"]        = { r15 = "RightUpperArm",     r6 = "Right Arm"        },
-    ["Perna Esquerda"]       = { r15 = "LeftUpperLeg",      r6 = "Left Leg"         },
-    ["Perna Direita"]        = { r15 = "RightUpperLeg",     r6 = "Right Leg"        },
-}
-
-local function detectRig(char)
-    if char:FindFirstChild("UpperTorso") then return "r15"
-    elseif char:FindFirstChild("Torso")  then return "r6"
-    else return "custom" end
-end
-
-local function getTargetPart(char)
-    local sel   = State.HitboxPart or "Corpo Inteiro (Root)"
-    local rig   = detectRig(char)
-    local entry = HITBOX_PARTS[sel]
-    if entry then
-        local p = char:FindFirstChild(entry[rig] or entry.r15 or entry.r6)
-        if p and p:IsA("BasePart") then return p end
-    end
-    for _, fb in ipairs({"HumanoidRootPart","Torso","UpperTorso","Head"}) do
-        local p = char:FindFirstChild(fb)
-        if p and p:IsA("BasePart") then return p end
-    end
-    return nil
-end
+-- hitboxData[player] = { part=Part, weld=Weld, conn=Connection }
 
 local function removeHitbox(player)
     local d = hitboxData[player]
     if not d then return end
     if d.conn then d.conn:Disconnect() end
-    if d.hl and d.hl.Parent then pcall(function() d.hl:Destroy() end) end
-    -- Restaura todas as parts
-    for _, s in ipairs(d.saved or {}) do
-        pcall(function()
-            if s.part and s.part.Parent then
-                s.part.Size       = s.origSize
-                s.part.CanCollide = s.origCC
-                s.part.Massless   = s.origMass
-            end
-        end)
-    end
-    -- Restaura transparência local da target
-    pcall(function()
-        if d.target and d.target.Parent then
-            d.target.LocalTransparencyModifier = 0
-        end
-    end)
+    pcall(function() if d.part and d.part.Parent then d.part:Destroy() end end)
     hitboxData[player] = nil
 end
 
@@ -901,74 +851,60 @@ local function applyHitbox(player)
     local char = player.Character
     if not char then return end
 
-    local target = getTargetPart(char)
-    if not target then return end
+    -- Aguarda HRP
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+           or  char:FindFirstChild("Torso")
+    if not hrp then return end
 
-    local size  = math.max(State.HitboxSize or 5, 1)
-    local saved = {}
+    local size = math.max(State.HitboxSize or 5, 1)
 
-    -- Salva e desliga CanCollide em TODAS as parts de uma vez
-    -- Faz isso ANTES de expandir o Size para evitar 1 frame de colisão
-    for _, part in ipairs(char:GetDescendants()) do
-        if part:IsA("BasePart") then
-            pcall(function()
-                table.insert(saved, {
-                    part       = part,
-                    origSize   = part.Size,
-                    origCC     = part.CanCollide,
-                    origMass   = part.Massless,
-                    origTransp = part.LocalTransparencyModifier,
-                })
-                part.CanCollide = false
-                part.Massless   = true
-            end)
-        end
-    end
+    -- Cria a part hitbox
+    local p = Instance.new("Part")
+    p.Name         = "_CTHitbox"
+    p.Size         = Vector3.new(size, size, size)
+    p.CFrame       = hrp.CFrame
+    p.Anchored     = false
+    p.CanCollide   = false    -- nunca colide com nada
+    p.Massless     = true     -- zero impacto na física
+    p.Transparency = 1        -- completamente invisível por padrão
+    p.CastShadow   = false
+    p.Parent       = char     -- filho do char: detectado como parte do modelo
 
-    -- Agora expande o Size da part alvo
-    pcall(function()
-        target.Size = Vector3.new(size, size, size)
-        -- Invisível: LocalTransparencyModifier só afeta o cliente local
-        -- não o servidor, então não quebra nada
-        target.LocalTransparencyModifier = 1
-    end)
+    -- Weld: segue o HRP perfeitamente sem usar física
+    local w = Instance.new("Weld")
+    w.Part0  = hrp
+    w.Part1  = p
+    w.C0     = CFrame.new()
+    w.C1     = CFrame.new()
+    w.Parent = p
 
-    -- Highlight laranja para visualização (só aparece se alpha < 1)
-    local hl = Instance.new("Highlight")
-    hl.Adornee             = target
-    hl.FillColor           = Color3.fromRGB(255, 140, 0)
-    hl.OutlineColor        = Color3.fromRGB(255, 200, 0)
-    hl.FillTransparency    = State.HitboxAlpha
-    hl.OutlineTransparency = State.HitboxAlpha >= 1 and 1 or 0
-    hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
-    hl.Parent              = char
-
-    -- Heartbeat leve: só verifica target e atualiza tamanho/visual
-    -- NÃO itera char:GetDescendants() toda frame (pesado)
+    -- Heartbeat leve: só garante propriedades e atualiza Size/visual
     local conn = RunService.Heartbeat:Connect(function()
-        if not target or not target.Parent then
+        if not p or not p.Parent then
+            removeHitbox(player); return
+        end
+        if not hrp or not hrp.Parent then
             removeHitbox(player); return
         end
 
-        -- Mantém CanCollide=false apenas na target (mais leve)
-        target.CanCollide = false
-        target.Massless   = true
-        target.LocalTransparencyModifier = 1
+        -- Garante que nada reverteu
+        if p.CanCollide then p.CanCollide = false end
+        if not p.Massless then p.Massless = true end
 
-        -- Atualiza tamanho só se mudou
+        -- Atualiza size se slider mudou
         local ns = math.max(State.HitboxSize or 5, 1)
-        if target.Size.X ~= ns then
-            target.Size = Vector3.new(ns, ns, ns)
+        if p.Size.X ~= ns then
+            p.Size = Vector3.new(ns, ns, ns)
         end
 
-        -- Atualiza Highlight
-        if hl and hl.Parent then
-            hl.FillTransparency    = State.HitboxAlpha
-            hl.OutlineTransparency = State.HitboxAlpha >= 1 and 1 or 0
+        -- Transparência: 1 = invisível, 0 = laranja visível
+        local alpha = State.HitboxAlpha
+        if p.Transparency ~= alpha then
+            p.Transparency = alpha
         end
     end)
 
-    hitboxData[player] = { saved = saved, conn = conn, hl = hl, target = target }
+    hitboxData[player] = { part = p, weld = w, conn = conn }
 end
 
 local function startHitboxSync() end
@@ -1610,49 +1546,35 @@ do
         end,
     })
 
-    TabCombat:Dropdown({
-        Title  = "Parte do Corpo",
-        Desc   = "Seleciona onde o hitbox expandido será aplicado",
-        Values = {
-            "Corpo Inteiro (Root)",
-            "Cabeça",
-            "Torso",
-            "Torso Inferior",
-            "Braço Esquerdo",
-            "Braço Direito",
-            "Perna Esquerda",
-            "Perna Direita",
-        },
-        Value    = "Corpo Inteiro (Root)",
-        Callback = function(v)
-            State.HitboxPart = v
-            if State.HitboxEnabled then refreshHitboxes() end
-        end,
-    })
-
     TabCombat:Slider({
         Title = "Tamanho",
-        Desc  = "Expande as parts do corpo em todos os lados",
-        Step  = 0.5,
-        Value = { Min = 1, Max = 30, Default = 5 },
+        Desc  = "Tamanho da hitbox em volta do corpo",
+        Step  = 1,
+        Value = { Min = 1, Max = 50, Default = 10 },
         Callback = function(v)
             State.HitboxSize = v
-            if State.HitboxEnabled then refreshHitboxes() end
+            -- Atualiza em tempo real sem reaplica
+            for _, d in pairs(hitboxData) do
+                pcall(function()
+                    if d.part and d.part.Parent then
+                        d.part.Size = Vector3.new(v, v, v)
+                    end
+                end)
+            end
         end,
     })
 
     TabCombat:Slider({
         Title = "Transparência",
-        Desc  = "0 = laranja visível  |  1 = invisível",
+        Desc  = "1 = invisível  |  0 = laranja visível",
         Step  = 0.05,
         Value = { Min = 0, Max = 1, Default = 1 },
         Callback = function(v)
             State.HitboxAlpha = v
             for _, d in pairs(hitboxData) do
                 pcall(function()
-                    if d.hl and d.hl.Parent then
-                        d.hl.FillTransparency    = v
-                        d.hl.OutlineTransparency = v >= 1 and 1 or 0
+                    if d.part and d.part.Parent then
+                        d.part.Transparency = v
                     end
                 end)
             end
