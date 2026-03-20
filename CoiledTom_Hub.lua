@@ -24,6 +24,7 @@ local HttpService      = game:GetService("HttpService")
 local TeleportService  = game:GetService("TeleportService")
 local StarterGui       = game:GetService("StarterGui")
 local Lighting         = game:GetService("Lighting")
+local PhysicsService   = game:GetService("PhysicsService")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera      = workspace.CurrentCamera
@@ -534,7 +535,6 @@ local function mkLine(col, thick)
     l.Visible     = false
     l.Color       = col   or Color3.fromRGB(255, 50, 50)
     l.Thickness   = thick or 1.5
-    -- AlwaysOnTop: aparece mesmo atrás de paredes (wallhack ESP)
     pcall(function() l.AlwaysOnTop = true end)
     return l
 end
@@ -560,6 +560,33 @@ local function mkQuad()
     return q
 end
 
+-- Highlight: ESP nativo do Roblox que aparece ATRAVÉS de paredes
+-- Funciona em qualquer executor sem Drawing API
+local espHighlights = {}  -- [player] = Highlight
+
+local function removeHighlight(player)
+    if espHighlights[player] then
+        pcall(function() espHighlights[player]:Destroy() end)
+        espHighlights[player] = nil
+    end
+end
+
+local function applyHighlight(player)
+    removeHighlight(player)
+    if not State.ESPEnabled then return end
+    local char = player.Character
+    if not char then return end
+    local hl = Instance.new("Highlight")
+    hl.Adornee          = char
+    hl.FillColor        = State.ESPColor
+    hl.OutlineColor     = State.ESPColor
+    hl.FillTransparency = 0.6
+    hl.OutlineTransparency = 0
+    hl.DepthMode        = Enum.HighlightDepthMode.AlwaysOnTop
+    hl.Parent           = char
+    espHighlights[player] = hl
+end
+
 local function cleanESP(player)
     local o = espObjects[player]
     if not o then return end
@@ -571,6 +598,7 @@ local function cleanESP(player)
         pcall(function() sb:Destroy() end)
     end
     espObjects[player] = nil
+    removeHighlight(player)
 end
 
 local function buildESP(player)
@@ -614,31 +642,38 @@ local function removeCham(player)
 end
 
 -- Calcula bounding box 2D universal — funciona em R6, R15 e custom rigs
+-- Ignora parts expandidas pelo hitbox (Transparency = 1 E Size > 4)
 local function getBox(char)
-    -- Coleta TODAS as BaseParts do character visíveis
     local parts = {}
+
+    -- Pega apenas parts ORIGINAIS do personagem (não hitbox expandidas)
     for _, v in ipairs(char:GetDescendants()) do
-        if v:IsA("BasePart") and v.Transparency < 1 then
-            table.insert(parts, v)
-        end
-    end
-    -- Fallback: sem partes visíveis, tenta qualquer BasePart
-    if #parts == 0 then
-        for _, v in ipairs(char:GetDescendants()) do
-            if v:IsA("BasePart") then
+        if v:IsA("BasePart") then
+            -- Ignora parts que o hitbox expandiu (ficam com Transparency=1)
+            -- mas mantém parts originalmente transparentes do personagem
+            local isHitboxExpanded = (v.Transparency >= 1 and
+                                      v.Size.X > 4 and
+                                      v.Size.Y > 4)
+            if not isHitboxExpanded then
                 table.insert(parts, v)
             end
         end
     end
+
+    if #parts == 0 then
+        -- fallback: pega tudo
+        for _, v in ipairs(char:GetDescendants()) do
+            if v:IsA("BasePart") then table.insert(parts, v) end
+        end
+    end
     if #parts == 0 then return nil end
 
-    -- Projeta todas as partes na tela e calcula bounding box 2D real
-    local minX, minY = math.huge,  math.huge
+    -- Projeta todos os 8 cantos de cada part (funciona com rotações)
+    local minX, minY =  math.huge,  math.huge
     local maxX, maxY = -math.huge, -math.huge
     local anyVisible = false
 
     for _, part in ipairs(parts) do
-        -- Projeta os 8 cantos da part para cobrir rotações
         local sz = part.Size * 0.5
         local cf = part.CFrame
         local corners = {
@@ -652,32 +687,30 @@ local function getBox(char)
             cf * Vector3.new(-sz.X, -sz.Y, -sz.Z),
         }
         for _, corner in ipairs(corners) do
-                local sp, _ = Camera:WorldToViewportPoint(corner)
-                -- Inclui mesmo atrás de paredes (sp.Z > 0 = na frente da câmera)
-                if sp.Z > 0 then
-                    anyVisible = true
-                    if sp.X < minX then minX = sp.X end
-                    if sp.Y < minY then minY = sp.Y end
-                    if sp.X > maxX then maxX = sp.X end
-                    if sp.Y > maxY then maxY = sp.Y end
-                end
+            local sp = Camera:WorldToViewportPoint(corner)
+            -- sp.Z > 0 = na frente da câmera (inclui atrás de paredes)
+            if sp.Z > 0 then
+                anyVisible = true
+                if sp.X < minX then minX = sp.X end
+                if sp.Y < minY then minY = sp.Y end
+                if sp.X > maxX then maxX = sp.X end
+                if sp.Y > maxY then maxY = sp.Y end
             end
+        end
     end
 
     if not anyVisible then return nil end
 
-    -- Margem pequena
     local pad = 2
     minX = minX - pad; minY = minY - pad
     maxX = maxX + pad; maxY = maxY + pad
 
-    local cx = (minX + maxX) / 2
     return {
         tl  = Vector2.new(minX, minY),
         tr  = Vector2.new(maxX, minY),
         br  = Vector2.new(maxX, maxY),
         bl  = Vector2.new(minX, maxY),
-        cx  = cx,
+        cx  = (minX + maxX) / 2,
         top = minY,
         bot = maxY,
     }
@@ -690,14 +723,24 @@ end
 --       (raycasts e dano batem nelas normalmente)
 --    2. Seta Transparency das parts expandidas
 --       conforme o slider (0=laranja visível, 1=invisível)
---    3. Nunca toca no LocalPlayer
---    4. Restaura tudo ao desativar
+--    3. CollisionGroup próprio — hitboxes NÃO colidem
+--       entre si nem com o LocalPlayer
+--    4. Nunca toca no LocalPlayer
+--    5. Restaura tudo ao desativar
 -- ══════════════════════════════════════════════════════
 local hitboxData = {}
 -- hitboxData[player] = {
---   { part=BasePart, origSize=Vector3, origTransp=number, origColor=Color3 },
+--   { part=BasePart, origSize=Vector3, origTransp=number, origColor=Color3, origGroup=string },
 --   ...
 -- }
+
+-- Cria collision group: hitboxes não colidem entre si nem com o Default
+local HB_GROUP = "CTHitbox"
+pcall(function()
+    PhysicsService:RegisterCollisionGroup(HB_GROUP)
+    PhysicsService:CollisionGroupSetCollidable(HB_GROUP, HB_GROUP, false)
+    PhysicsService:CollisionGroupSetCollidable(HB_GROUP, "Default", false)
+end)
 
 local HITBOX_PARTS = {
     ["Corpo Inteiro (Root)"] = { r15 = "HumanoidRootPart", r6 = "HumanoidRootPart" },
@@ -737,9 +780,10 @@ local function removeHitbox(player)
     for _, e in ipairs(entries) do
         pcall(function()
             if e.part and e.part.Parent then
-                e.part.Size         = e.origSize
-                e.part.Transparency = e.origTransp
-                e.part.Color        = e.origColor
+                e.part.Size                   = e.origSize
+                e.part.Transparency           = e.origTransp
+                e.part.Color                  = e.origColor
+                e.part.CollisionGroup         = e.origGroup or "Default"
             end
         end)
     end
@@ -801,14 +845,16 @@ local function applyHitbox(player)
                 origSize   = part.Size,
                 origTransp = part.Transparency,
                 origColor  = part.Color,
+                origGroup  = part.CollisionGroup or "Default",
             }
             -- Expande a part real (servidor detecta o dano)
             part.Size         = Vector3.new(size, size, size)
-            -- Cor laranja para debug visual
             part.Color        = col
-            -- Transparência controlada pelo slider
-            -- alpha=1 → invisível | alpha=0 → laranja sólido visível
             part.Transparency = alpha
+            -- Coloca no grupo isolado — não colide com outras hitboxes
+            pcall(function()
+                part.CollisionGroup = HB_GROUP
+            end)
             table.insert(entries, entry)
         end)
     end
@@ -995,10 +1041,14 @@ end)
 
 local function connectCharacterEvents(pl)
     pl.CharacterAdded:Connect(function(char)
-        -- Reconstrói drawings do ESP imediatamente
         buildESP(pl)
-
-        -- Aplica hitbox assim que HumanoidRootPart existir — sem task.wait fixo
+        -- Reaplica Highlight imediatamente no respawn
+        if State.ESPEnabled then
+            task.spawn(function()
+                task.wait()   -- 1 frame para o char existir
+                applyHighlight(pl)
+            end)
+        end
         if State.HitboxEnabled then
             local hrp = char:FindFirstChild("HumanoidRootPart")
             if hrp then
@@ -1011,7 +1061,6 @@ local function connectCharacterEvents(pl)
                 end)
             end
         end
-
         if State.ChamEnabled then applyCham(pl) end
     end)
 end
@@ -1023,6 +1072,9 @@ for _, pl in ipairs(Players:GetPlayers()) do
         connectCharacterEvents(pl)
         if State.HitboxEnabled and pl.Character then
             task.spawn(function() applyHitbox(pl) end)
+        end
+        if State.ESPEnabled and pl.Character then
+            task.spawn(function() applyHighlight(pl) end)
         end
     end
 end
@@ -1252,9 +1304,25 @@ do
 
     TabCombat:Toggle({
         Title = "ESP Box",
-        Desc  = "Retângulo 2D em volta do corpo",
+        Desc  = "Box 2D + Highlight através de paredes",
         Value = false,
-        Callback = function(v) State.ESPEnabled = v end,
+        Callback = function(v)
+            State.ESPEnabled = v
+            for _, pl in ipairs(Players:GetPlayers()) do
+                if pl == LocalPlayer then continue end
+                if v then
+                    applyHighlight(pl)
+                else
+                    removeHighlight(pl)
+                    local o = espObjects[pl]
+                    if o then
+                        for _, l in ipairs(o.lines) do l.Visible = false end
+                        o.label.Visible = false
+                        o.fill.Visible  = false
+                    end
+                end
+            end
+        end,
     })
 
     TabCombat:Toggle({
@@ -1267,7 +1335,16 @@ do
     TabCombat:Colorpicker({
         Title    = "Cor do ESP",
         Default  = Color3.fromRGB(255, 50, 50),
-        Callback = function(c) State.ESPColor = c end,
+        Callback = function(c)
+            State.ESPColor = c
+            -- Atualiza Highlights em tempo real
+            for _, hl in pairs(espHighlights) do
+                pcall(function()
+                    hl.FillColor    = c
+                    hl.OutlineColor = c
+                end)
+            end
+        end,
     })
 
     TabCombat:Slider({
