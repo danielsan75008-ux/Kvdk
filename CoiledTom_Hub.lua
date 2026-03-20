@@ -869,6 +869,27 @@ local function startHitbox()
     end)
 end
 
+-- Reconecta hitbox sempre que um player entra ou respawna
+local function hookHitboxRespawn(pl)
+    pl.CharacterAdded:Connect(function()
+        if not State.HitboxEnabled then return end
+        -- Desliga e liga rapidinho para forçar reaplicação no novo char
+        if hitboxConn then hitboxConn:Disconnect(); hitboxConn = nil end
+        task.wait()
+        startHitbox()
+    end)
+end
+
+-- Aplica para players já no jogo
+for _, pl in ipairs(Players:GetPlayers()) do
+    if pl ~= LocalPlayer then hookHitboxRespawn(pl) end
+end
+
+-- Aplica para novos players
+Players.PlayerAdded:Connect(function(pl)
+    hookHitboxRespawn(pl)
+end)
+
 -- Manter compatibilidade com chamadas existentes
 local function applyHitbox(player)   end
 local function startHitboxSync()     end
